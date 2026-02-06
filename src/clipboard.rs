@@ -45,9 +45,9 @@ pub enum ClipboardError {
     Watch(Arc<clipboard_watcher::Error>),
 }
 
-enum WatchRes<I> {
-    Some(I),
-    None,
+enum WatchRes {
+    Data(MimeDataMap),
+    Empty,
     Err(clipboard_watcher::Error),
 }
 
@@ -86,17 +86,42 @@ pub fn sub() -> impl Stream<Item = ClipboardMessage> {
                             {
                                 Ok(res) => {
                                     if !PRIVATE_MODE.load(atomic::Ordering::Relaxed) {
-                                        tx.blocking_send(WatchRes::Some(res)).unwrap();
+                                        // Read pipe data here in the blocking context
+                                        // instead of in the async task. read_to_end is
+                                        // blocking I/O and must not run on the async
+                                        // runtime — a slow source app would freeze the
+                                        // entire UI event loop.
+                                        let mut data = MimeDataMap::new();
+                                        for (mime_type, mut pipe) in res {
+                                            let mut contents = Vec::new();
+                                            match pipe.read_to_end(&mut contents) {
+                                                Ok(len) => {
+                                                    if len > 0 {
+                                                        data.insert(mime_type, contents);
+                                                    } else {
+                                                        debug!("data is empty: {mime_type}");
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    warn!("read error on pipe: {mime_type} {e}");
+                                                }
+                                            }
+                                        }
+                                        if tx.blocking_send(WatchRes::Data(data)).is_err() {
+                                            break;
+                                        }
                                     } else {
                                         info!("private mode")
                                     }
                                 }
                                 Err(e) => match e {
                                     clipboard_watcher::Error::ClipboardEmpty => {
-                                        tx.blocking_send(WatchRes::None).unwrap();
+                                        if tx.blocking_send(WatchRes::Empty).is_err() {
+                                            break;
+                                        }
                                     }
                                     _ => {
-                                        tx.blocking_send(WatchRes::Err(e)).unwrap();
+                                        let _ = tx.blocking_send(WatchRes::Err(e));
                                         break;
                                     }
                                 },
@@ -117,28 +142,7 @@ pub fn sub() -> impl Stream<Item = ClipboardMessage> {
                         i += 1;
 
                         match rx.recv().await {
-                            Some(WatchRes::Some(res)) => {
-                                let mut data = MimeDataMap::new();
-
-                                for (mime_type, mut pipe) in res {
-                                    let mut contents = Vec::new();
-
-                                    match pipe.read_to_end(&mut contents) {
-                                        Ok(len) => {
-                                            if len == 0 {
-                                                debug!("data is empty: {mime_type}");
-                                            } else {
-                                                data.insert(mime_type, contents);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                "read error on external pipe clipboard: {mime_type} {e}"
-                                            );
-                                        }
-                                    }
-                                }
-
+                            Some(WatchRes::Data(data)) => {
                                 if !data.is_empty() {
                                     let hash = hash_data(&data);
 
@@ -162,7 +166,7 @@ pub fn sub() -> impl Stream<Item = ClipboardMessage> {
                                 }
                             }
 
-                            Some(WatchRes::None) => {
+                            Some(WatchRes::Empty) => {
                                 if sent_empty {
                                     debug!("skipping repeated empty keyboard event");
                                     continue;
