@@ -1,7 +1,7 @@
 use chrono::Utc;
 use cosmic::app::Core;
 
-use cosmic::iced::clipboard::mime::AsMimeTypes;
+
 use cosmic::iced::keyboard::key::Named;
 use cosmic::iced::window::Id;
 use cosmic::iced::{self, Limits};
@@ -389,24 +389,31 @@ impl<Db: DbTrait + 'static> cosmic::Application for AppState<Db> {
                 }
                 clipboard::ClipboardMessage::EmptyKeyboard => {
                     if let Some(data) = self.db.get(0) {
-                        return copy_iced(data.raw_content().clone());
+                        return copy_wl(data.raw_content().clone(), self.config.sync_to_primary_selection);
                     }
                 }
             },
             AppMsg::Copy(id) => {
                 let task = match self.db.get_from_id(id) {
-                    Some(data) => copy_iced(data.raw_content().clone()),
+                    Some(data) => {
+                        copy_wl(data.raw_content().clone(), self.config.sync_to_primary_selection)
+                    }
                     None => {
                         error!("id not found");
                         Task::none()
                     }
                 };
 
+                // Close popup first so focus returns to the panel surface,
+                // then write clipboard (needs a focused surface in Wayland).
                 return Task::batch([task, self.close_popup()]);
             }
 
             AppMsg::CopySpecial(data) => {
-                return copy_iced(data);
+                return copy_wl(data, self.config.sync_to_primary_selection);
+            }
+            AppMsg::DoCopy(data, sync_to_primary) => {
+                do_copy(&data, sync_to_primary);
             }
             AppMsg::Clear => {
                 if let Err(e) = block_on(self.db.clear()) {
@@ -445,10 +452,8 @@ impl<Db: DbTrait + 'static> cosmic::Application for AppState<Db> {
                         })
                     ) && let Some(data) = self.db.get(self.focused)
                     {
-                        return Task::batch([
-                            copy_iced(data.raw_content().clone()),
-                            self.close_popup(),
-                        ]);
+                        let task = copy_wl(data.raw_content().clone(), self.config.sync_to_primary_selection);
+                        return Task::batch([task, self.close_popup()]);
                     }
                 }
                 EventMsg::Quit => {
@@ -595,21 +600,54 @@ impl<Db: DbTrait + 'static> cosmic::Application for AppState<Db> {
     }
 }
 
-// used because wl_clipboard can't copy when zwlr_data_control_manager_v1 is not there
-fn copy_iced(data: MimeDataMap) -> Task<AppMsg> {
-    struct MimeDataMapN(MimeDataMap);
+fn copy_wl(data: MimeDataMap, sync_to_primary: bool) -> Task<AppMsg> {
+    task_message(AppMsg::DoCopy(data, sync_to_primary))
+}
 
-    impl AsMimeTypes for MimeDataMapN {
-        fn available(&self) -> std::borrow::Cow<'static, [String]> {
-            std::borrow::Cow::Owned(self.0.keys().cloned().collect())
-        }
+fn do_copy(data: &MimeDataMap, sync_to_primary: bool) {
+    // Pick the best mime type to copy: prefer text/plain, then any text type
+    let preferred = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT"];
 
-        fn as_bytes(&self, mime_type: &str) -> Option<std::borrow::Cow<'static, [u8]>> {
-            self.0
-                .get(mime_type)
-                .map(|d| std::borrow::Cow::Owned(d.clone()))
+    let empty = vec![];
+    let (mime, content) = preferred
+        .iter()
+        .find_map(|m| data.get(*m).map(|c| (*m, c)))
+        .or_else(|| {
+            data.iter()
+                .find(|(m, _)| m.starts_with("text/"))
+                .map(|(m, c)| (m.as_str(), c))
+        })
+        .or_else(|| data.iter().next().map(|(m, c)| (m.as_str(), c)))
+        .unwrap_or(("text/plain", &empty));
+
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let spawn_wl_copy = |extra_args: &[&str]| {
+        let mut cmd = Command::new("wl-copy");
+        for arg in extra_args {
+            cmd.arg(arg);
         }
+        if let Ok(mut child) = cmd
+            .arg("--type")
+            .arg(mime)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(content);
+                // Dropping stdin closes the pipe, signaling EOF to wl-copy
+            }
+            // Don't wait — wl-copy forks to serve clipboard data in background
+        } else {
+            error!("failed to run wl-copy");
+        }
+    };
+
+    spawn_wl_copy(&[]);
+    if sync_to_primary {
+        spawn_wl_copy(&["--primary"]);
     }
-
-    cosmic::iced::clipboard::write_data(MimeDataMapN(data))
 }

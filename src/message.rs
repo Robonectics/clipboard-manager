@@ -17,6 +17,7 @@ pub enum AppMsg {
     RetryConnectingClipboard,
     Copy(EntryId),
     CopySpecial(MimeDataMap),
+    DoCopy(MimeDataMap, bool),
     Clear,
     Navigation(EventMsg),
     Db(DbMessage),

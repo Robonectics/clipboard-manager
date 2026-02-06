@@ -263,7 +263,6 @@ pub enum Error {
 pub struct Watcher {
     state: State,
     queue: EventQueue<State>,
-    primary: bool,
 }
 
 pub fn initialize<S>() -> Result<(EventQueue<S>, CommonState), Error>
@@ -346,7 +345,6 @@ impl Watcher {
         Ok(Watcher {
             state,
             queue,
-            primary: false,
         })
     }
 
@@ -355,11 +353,6 @@ impl Watcher {
         self.queue
             .blocking_dispatch(&mut self.state)
             .map_err(Error::WaylandCommunication)?;
-
-        // Check if the compositor supports primary selection.
-        if self.primary && !self.state.got_primary_selection {
-            return Err(Error::PrimarySelectionUnsupported);
-        }
 
         // Figure out which offer we're interested in.
         let data = match seat {
@@ -377,11 +370,7 @@ impl Watcher {
             return Err(Error::SeatNotFound);
         };
 
-        let offer = if self.primary {
-            &data.primary_offer
-        } else {
-            &data.offer
-        };
+        let offer = &data.offer;
 
         // Check if we found anything.
         match offer.clone() {

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{app::APPID, message::AppMsg};
 
-pub const CONFIG_VERSION: u64 = 3;
+pub const CONFIG_VERSION: u64 = 4;
 
 #[derive(CosmicConfigEntry, Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 // #[cfg_attr(test, derive(JsonSchema))]
@@ -35,6 +35,8 @@ pub struct Config {
     pub unique_session: bool,
     pub maximum_entries_by_page: NonZeroU32,
     pub preferred_mime_types: Vec<String>,
+    /// Also copy to primary selection (middle-click paste)
+    pub sync_to_primary_selection: bool,
 }
 
 pub static PRIVATE_MODE: AtomicBool = AtomicBool::new(false);
@@ -56,6 +58,7 @@ impl Default for Config {
             unique_session: false,
             maximum_entries_by_page: NonZero::new(50).unwrap(),
             preferred_mime_types: Vec::new(),
+            sync_to_primary_selection: true,
         }
     }
 }
